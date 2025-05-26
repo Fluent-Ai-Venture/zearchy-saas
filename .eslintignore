@@ -1,0 +1,9 @@
+# Ignore all files in the src/generated directory
+src/generated/**/*
+# Specifically ignore the wasm.js file
+src/generated/prisma/wasm.js
+# Ignore build output
+.next/
+out/
+# Ignore node modules
+node_modules/

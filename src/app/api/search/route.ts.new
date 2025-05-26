@@ -1,0 +1,293 @@
+// src/app/api/search/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { getAuth } from '@clerk/nextjs/server';
+import { ZipTrie } from '@/lib/ziptrie';
+
+/**
+ * Debug function to log the ZipTrie structure
+ */
+function debugZipTrie(trie: ZipTrie) {
+  // Log the search fields that are indexed
+  console.log('ZipTrie instance:', trie);
+  console.log('ZipTrie search method:', trie.search.toString());
+  
+  // Log some sample searches to see what's in the trie
+  console.log('Sample search for "ferr":', trie.search('ferr', 5));
+  console.log('Sample search for "fer":', trie.search('fer', 5));
+  console.log('Sample search for "f":', trie.search('f', 5));
+  
+  // Log all words in the trie (up to 20)
+  console.log('All words in trie (up to 20):', trie.getAllWords(20));
+}
+
+// In-memory store for user data
+export const userDataStore: Record<string, {
+  trie: ZipTrie;
+  rawData: Record<string, unknown>[];
+  searchFields: string[];
+  returnFields: string[];
+  lastUpdated: Date;
+}> = {};
+
+export async function GET(request: NextRequest) {
+  try {
+    const { userId } = getAuth(request);
+    const searchParams = request.nextUrl.searchParams;
+    const query = searchParams.get('q') || '';
+    const dataId = searchParams.get('dataId') || '';
+    const fieldsParam = searchParams.get('fields') || '';
+    const limit = searchParams.get('limit') ? parseInt(searchParams.get('limit') || '10') : 10;
+    
+    // Parse the fields parameter if provided
+    const searchFields = fieldsParam ? fieldsParam.split(',') : [];
+    
+    console.log('Search request:', { userId, query, dataId, searchFields, limit });
+    console.log('Search query (lowercase):', query.toLowerCase());
+    
+    // Check if user is authenticated
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      );
+    }
+    
+    // Check if we have data for this user
+    if (!userDataStore[userId]) {
+      console.log('No data found for userId:', userId);
+      return NextResponse.json({
+        results: [],
+        message: 'No data found. Please upload data first.'
+      });
+    }
+
+    // Get the user's data
+    const userData = userDataStore[userId];
+    console.log('Current data state for user:', {
+      dataSize: userData.rawData.length,
+      searchFields: userData.searchFields,
+      dataId: dataId || 'none'
+    });
+    
+    // If specific fields were requested, update the search configuration if needed
+    if (searchFields.length > 0 && JSON.stringify(searchFields) !== JSON.stringify(userData.searchFields)) {
+      console.log('Updating search fields to:', searchFields);
+      const trie = new ZipTrie();
+      
+      // Load the data into the ZipTrie with the specified search fields
+      trie.loadData(userData.rawData, searchFields);
+      
+      userDataStore[userId] = {
+        ...userData,
+        trie,
+        searchFields,
+        lastUpdated: new Date()
+      };
+    }
+
+    // Perform the search
+    const results = userDataStore[userId].trie.search(query, limit);
+    console.log('ZipTrie search results count:', results.length);
+
+    // Get the trie visualization data
+    const trieVisualization = userDataStore[userId].trie.getTreeVisualization();
+    
+    // Get the search path for visualization
+    const searchPath = userDataStore[userId].trie.findPath(query);
+    console.log('Search path length:', searchPath?.length || 0);
+
+    // Map the results to include only the fields we want to return
+    const mappedResults = results.map(result => {
+      // If no return fields specified, return all fields
+      if (!userDataStore[userId].returnFields || userDataStore[userId].returnFields.length === 0) {
+        return result.data;
+      }
+
+      // Otherwise, only return the specified fields
+      const mappedResult: Record<string, unknown> = {};
+      userDataStore[userId].returnFields.forEach(field => {
+        if (result.data[field] !== undefined) {
+          mappedResult[field] = result.data[field];
+        }
+      });
+
+      return mappedResult;
+    });
+
+    return NextResponse.json({
+      results: mappedResults,
+      query,
+      count: mappedResults.length,
+      trieVisualization,
+      searchPath
+    });
+  } catch (error) {
+    console.error('Search error:', error);
+    return NextResponse.json(
+      { error: 'An error occurred during search', details: String(error) },
+      { status: 500 }
+    );
+  }
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const { userId } = getAuth(request);
+    
+    // Check if user is authenticated
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      );
+    }
+    
+    // Parse the request body
+    const requestData = await request.json();
+    const { data, searchFields = [], returnFields = [], dataId } = requestData;
+    
+    // Case 1: Field configuration update
+    if (searchFields.length > 0 && !data) {
+      console.log('Processing field configuration request for dataId:', dataId);
+      
+      // Check if we have data for this user
+      if (!userDataStore[userId]) {
+        console.log('No user data found for userId:', userId);
+        return NextResponse.json({
+          error: 'No data found. Please upload data first.',
+          status: 'error'
+        }, { status: 400 });
+      }
+      
+      console.log('Using existing data with dataId:', dataId);
+      
+      // Create a new ZipTrie instance
+      const trie = new ZipTrie();
+      
+      console.log('=== DATA BEING LOADED INTO TRIE ===');
+      // Load the data into the trie with the specified search fields
+      trie.loadData(userDataStore[userId].rawData, searchFields);
+      
+      // Update the user data store
+      userDataStore[userId] = {
+        ...userDataStore[userId],
+        trie,
+        searchFields,
+        returnFields: returnFields.length > 0 ? returnFields : searchFields,
+        lastUpdated: new Date()
+      };
+      
+      // Log the trie structure after loading
+      console.log('=== ZIPTRIE STRUCTURE AFTER LOADING ===');
+      debugZipTrie(trie);
+      console.log('=== END ZIPTRIE STRUCTURE ===');
+      
+      console.log('Configuration updated successfully for userId:', userId);
+      
+      return NextResponse.json({
+        success: true,
+        message: 'Search configuration updated successfully',
+        dataId,
+        fieldsConfigured: searchFields.length
+      });
+    }
+    
+    // Case 2: Data upload request (from upload API)
+    if (data && Array.isArray(data) && dataId) {
+      console.log('Processing data upload request for dataId:', dataId);
+      console.log('Received data with', data.length, 'items');
+      
+      // Validate the data
+      if (data.length === 0) {
+        console.error('Received empty data array');
+        return NextResponse.json({
+          error: 'No data found in the uploaded file',
+          status: 'error'
+        }, { status: 400 });
+      }
+      
+      // Log sample data to verify structure
+      console.log('Sample data items:');
+      data.slice(0, 2).forEach((item: Record<string, unknown>, index: number) => {
+        console.log(`Item ${index}:`, JSON.stringify(item));
+      });
+      
+      // Clean and normalize the data
+      const cleanedData = data.map((item: Record<string, unknown>) => {
+        const cleanedItem: Record<string, unknown> = {};
+        
+        // Process each field
+        Object.entries(item).forEach(([key, value]) => {
+          // Skip empty values
+          if (value === null || value === undefined || value === '') {
+            return;
+          }
+          
+          // Normalize field names (trim whitespace, ensure consistent casing)
+          const cleanKey = key.trim();
+          
+          // Store the value
+          cleanedItem[cleanKey] = value;
+        });
+        
+        return cleanedItem;
+      });
+      
+      console.log('Cleaned data sample:', JSON.stringify(cleanedData.slice(0, 1)));
+      
+      // Determine fields to index if not provided
+      const fieldsToIndex = searchFields.length > 0 ? 
+        searchFields : 
+        Object.keys(cleanedData[0] || {});
+      
+      console.log('Fields to index:', fieldsToIndex);
+      
+      // Create a new ZipTrie instance
+      const trie = new ZipTrie();
+      
+      // Load the data into the trie
+      console.log(`Loading ${cleanedData.length} items into ZipTrie with fields:`, fieldsToIndex);
+      trie.loadData(cleanedData, fieldsToIndex);
+      
+      // Store the cleaned data in memory
+      userDataStore[userId] = {
+        trie,
+        rawData: cleanedData,
+        searchFields: fieldsToIndex,
+        returnFields: returnFields.length > 0 ? returnFields : fieldsToIndex,
+        lastUpdated: new Date()
+      };
+      
+      // Log the trie structure after loading
+      console.log('=== ZIPTRIE STRUCTURE AFTER LOADING ===');
+      debugZipTrie(trie);
+      console.log('=== END ZIPTRIE STRUCTURE ===');
+      
+      // Verify the data was stored correctly
+      console.log('Verifying data storage:');
+      console.log(`- Raw data count: ${userDataStore[userId].rawData.length}`);
+      console.log(`- Search fields: ${userDataStore[userId].searchFields}`);
+      console.log(`- Sample search for 'f': ${JSON.stringify(trie.search('f', 2))}`);
+      
+      return NextResponse.json({
+        success: true,
+        message: 'Data stored successfully',
+        dataId,
+        recordCount: cleanedData.length,
+        searchFields: fieldsToIndex
+      });
+    }
+    
+    // If we get here, the request was invalid
+    return NextResponse.json(
+      { error: 'Invalid request format' },
+      { status: 400 }
+    );
+  } catch (error) {
+    console.error('Upload error:', error);
+    return NextResponse.json(
+      { error: 'An error occurred while processing your data', details: String(error) },
+      { status: 500 }
+    );
+  }
+}

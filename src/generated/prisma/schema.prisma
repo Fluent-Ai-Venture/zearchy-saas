@@ -1,0 +1,58 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Dataset {
+  id        String    @id @default(uuid())
+  userId    String
+  name      String
+  createdAt DateTime  @default(now())
+  products  Product[]
+  trie      Trie?
+
+  @@index([userId])
+}
+
+model Product {
+  id        String   @id @default(uuid())
+  datasetId String
+  data      Json
+  createdAt DateTime @default(now())
+  dataset   Dataset  @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  @@index([datasetId])
+}
+
+model Trie {
+  id        String   @id @default(uuid())
+  datasetId String   @unique
+  trieJson  Json     @db.JsonB // Use JsonB for better performance with large JSON objects
+  createdAt DateTime @default(now())
+  dataset   Dataset  @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+}
+
+model ApiKey {
+  id          String    @id @default(uuid())
+  userId      String // The user who owns this API key
+  key         String    @unique // The actual API key
+  name        String // A friendly name for the key
+  createdAt   DateTime  @default(now())
+  lastUsedAt  DateTime? // Track when the key was last used
+  isActive    Boolean   @default(true) // Whether the key is active or revoked
+  permissions Json      @default("{}") // Permissions for this key (e.g., datasets it can access)
+
+  @@index([userId])
+  @@index([key])
+}
